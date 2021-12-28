@@ -1,8 +1,8 @@
 import tensorflow as tf
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import variable_scope as vs
-from tensorflow.python.ops.rnn_cell_impl import BasicLSTMCell
 from tensorflow.python.ops.rnn import static_rnn
+from tensorflow.python.ops.rnn_cell_impl import BasicLSTMCell
 from tensorflow.python.util import nest
 
 from alg_parameters import *
@@ -14,7 +14,7 @@ class FCMNet(object):
     def build_actor_network(self, observation, input_state):
         """Building a multi-agent actor net"""
         with tf.variable_scope('actor_network', reuse=tf.AUTO_REUSE):
-            outputs = self.shared_dense_layer("actor_layer1", observation, ACTOR_LAYER1, activation='relu')
+            outputs = self.shared_dense_layer("actor_layer1", observation, ACTOR_LAYER1, activation='tanh')
             outputs = tf.unstack(outputs, N_AGENTS, 1)
 
             lstm_cell_one = BasicLSTMCell(ACTOR_LAYER2, forget_bias=1.0,
@@ -40,7 +40,7 @@ class FCMNet(object):
     def build_critic_network(self, state, input_state):
         """Building a multi-agent critic net"""
         with tf.variable_scope('critic_network', reuse=tf.AUTO_REUSE):
-            outputs = self.shared_dense_layer("critic_layer1", state, CRITIC_LAYER1, activation='relu')
+            outputs = self.shared_dense_layer("critic_layer1", state, CRITIC_LAYER1, activation='tanh')
             outputs = tf.unstack(outputs, N_AGENTS, 1)
 
             lstm_cell_one = BasicLSTMCell(CRITIC_LAYER2, forget_bias=1.0,
