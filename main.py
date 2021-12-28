@@ -9,7 +9,7 @@ from util import get_session, save_state, set_global_seeds
 
 
 def train():
-    setproctitle.setproctitle('5m6m-StarCraft-' + EXPERIMENT_NAME + "@" + USER_NAME)
+    setproctitle.setproctitle('FCMNet-Loss-' + EXPERIMENT_NAME + "@" + USER_NAME)
     env = build_multiprocessing_env(N_ENVS)
     learn(env=env)
     return env
