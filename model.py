@@ -1,110 +1,327 @@
-import numpy as np
 import tensorflow as tf
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import variable_scope as vs
+from tensorflow.python.ops.rnn_cell_impl import BasicLSTMCell
+from tensorflow.python.util import nest
 
-from alg_parameters import *
-from policy import Policy
-from util import get_session, initialize
+from arguments import *
 
 
-class Model(object):
-    """Build tensor graph and calculate flow."""
+class FCMNet:
+    """Build actor and critic graph. The messages transferred between actors are binarized."""
+    def __init__(self, sess):
+        self.sess = sess
+        self.one_output_1, self.one_add_1, self.one_output_2, self.one_add_2, self.one_output_3, self.one_add_3, \
+            self.one_output_4, self.one_add_4, self.two_output_1, self.two_add_1, self.two_output_2, self.two_add_2, \
+            self.two_output_3, self.two_add_3, self.two_output_4, self.two_add_4, self.three_output_1, \
+            self.three_add_1, self.three_output_2, self.three_add_2, self.three_output_3, self.three_add_3, \
+            self.three_output_4, self.three_add_4, self.four_output_1, self.four_add_1, self.four_output_2, \
+            self.four_add_2, self.four_output_3, self.four_add_3, self.four_output_4, self.four_add_4,\
+            self.five_output_1, self.five_add_1, self.five_output_2, self.five_add_2, self.five_output_3, \
+            self.five_add_3, self.five_output_4, self.five_add_4 = [None for _ in range(40)]
 
-    def __init__(self, env):
-        self.sess = get_session()
+    @staticmethod
+    def encoder(state_ch):
+        """Encoding and decoding messages"""
+        with tf.variable_scope("binary", reuse=tf.AUTO_REUSE):
+            with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
+                encode_layer = tf.layers.dense(state_ch, ENCODING_LAYER1, activation=tf.nn.relu,
+                                               name="encode_layer_1")
+                encoder_output = tf.layers.dense(encode_layer, ENCODING_OUTPUT, name="encode_layer_2",
+                                                 activation=tf.nn.tanh)
+                add_ph = tf.placeholder(shape=(None, ENCODING_OUTPUT), dtype=tf.float32)
+                # Binarized
+                message = encoder_output + add_ph
+                decode_layer = tf.layers.dense(message, ENCODING_LAYER1, name="decode_layer_1",
+                                               activation=tf.nn.relu)
+                decode_output = tf.layers.dense(decode_layer, ENCODING_INPUT, name="decode_layer_2")
+        return decode_output, encoder_output, add_ph
 
-        with tf.variable_scope('ppo_model', reuse=tf.AUTO_REUSE):
-            act_model = Policy(env, N_ENVS, self.sess)
-            self.train_model = train_model = Policy(env, MINIBATCH_SIZE, self.sess)
-            evalue_model = Policy(env, 1, self.sess)
+    def static_rnn(self, cell, inputs, dtype=None, scope=None):
+        """Binarized communication channel"""
+        outputs = []
+        with vs.variable_scope(scope or "rnn") as varscope:
+            if varscope.caching_device is None:
+                varscope.set_caching_device(lambda op: op.device)
 
-        # Create placeholders
-        self.action = tf.placeholder(tf.int32, [MINIBATCH_SIZE, N_AGENTS])
-        self.advantage = tf.placeholder(tf.float32, [MINIBATCH_SIZE, N_AGENTS])
-        self.returns = tf.placeholder(tf.float32, [MINIBATCH_SIZE, N_AGENTS])
-        # Keep track of old actor
-        self.old_ps = tf.placeholder(tf.float32, [MINIBATCH_SIZE, N_AGENTS, N_ACTIONS])
-        # Keep track of old critic
-        self.old_v = tf.placeholder(tf.float32, [MINIBATCH_SIZE, N_AGENTS])
+            first_input = inputs[0]
 
-        # Calculate ratio
-        new_p = train_model.dist.prob(self.action)
-        expand_action = tf.expand_dims(self.action, axis=-1)
-        old_p = tf.squeeze(tf.gather(params=self.old_ps, indices=expand_action, batch_dims=-1))
-        ratio = tf.exp(tf.log(tf.clip_by_value(new_p, 1e-10, 1.0)) - tf.log(old_p))
+            if first_input.get_shape().ndims != 1:
+                input_shape = first_input.get_shape().with_rank_at_least(2)
+                fixed_batch_size = input_shape[0]
+                flat_inputs = nest.flatten(inputs)
+                for flat_input in flat_inputs:
+                    input_shape = flat_input.get_shape().with_rank_at_least(2)
+                    batch_size, input_size = input_shape[0], input_shape[1:]
+                    fixed_batch_size.merge_with(batch_size)
+                    for i, size in enumerate(input_size):
+                        if size.value is None:
+                            raise ValueError(
+                                "Input size (dimension %d of inputs) must be accessible via "
+                                "shape inference, but saw value None." % i)
+            batch_size = array_ops.shape(first_input)[0]
 
-        # Entropy
-        entropy = tf.reduce_mean(train_model.dist.entropy())
+            state = cell.get_initial_state(inputs=None, batch_size=batch_size, dtype=dtype)
 
-        # Critic loss
-        v_pred = train_model.v
-        v_pred_clipped = self.old_v + tf.clip_by_value(train_model.v - self.old_v, - CLIP_RANGE,
-                                                       CLIP_RANGE)
-        value_losses1 = tf.square(v_pred - self.returns)
-        value_losses2 = tf.square(v_pred_clipped - self.returns)
-        critic_loss = .5 * tf.reduce_mean(tf.maximum(value_losses1, value_losses2))
+            (output_1, state_o_1) = cell(inputs[0], state)
+            outputs.append(output_1)
+            state_c_1 = state_o_1.c
+            state_h_1 = state_o_1.h
+            state_ch = tf.concat([state_c_1, state_h_1], axis=-1)
+            decode_output, encoder_output_1, add_ph_1 = self.encoder(state_ch)
+            state_c_1, state_h_1 = tf.split(decode_output, 2, axis=-1)
+            state_1 = tf.contrib.rnn.LSTMStateTuple(state_c_1, state_h_1)
 
-        # Actor loss
-        ratio = tf.squeeze(ratio)
-        policy_losses = -self.advantage * ratio
-        policy_losses2 = -self.advantage * tf.clip_by_value(ratio, 1.0 - CLIP_RANGE, 1.0 + CLIP_RANGE)
-        policy_loss = tf.reduce_mean(tf.maximum(policy_losses, policy_losses2))
-        actor_loss = policy_loss - entropy * ENTROPY_COEF
+            varscope.reuse_variables()
+            (output_2, state_o_2) = cell(inputs[1], state_1)
+            outputs.append(output_2)
+            state_c_2 = state_o_2.c
+            state_h_2 = state_o_2.h
+            state_ch = tf.concat([state_c_2, state_h_2], axis=-1)
+            decode_output, encoder_output_2, add_ph_2 = self.encoder(state_ch)
+            state_c_2, state_h_2 = tf.split(decode_output, 2, axis=-1)
+            state_2 = tf.contrib.rnn.LSTMStateTuple(state_c_2, state_h_2)
 
-        clip_frac = tf.reduce_mean(tf.to_float(tf.greater(tf.abs(ratio - 1.0), CLIP_RANGE)))
+            varscope.reuse_variables()
+            (output_3, state_o_3) = cell(inputs[2], state_2)
+            outputs.append(output_3)
+            state_c_3 = state_o_3.c
+            state_h_3 = state_o_3.h
+            state_ch = tf.concat([state_c_3, state_h_3], axis=-1)
+            decode_output, encoder_output_3, add_ph_3 = self.encoder(state_ch)
+            state_c_3, state_h_3 = tf.split(decode_output, 2, axis=-1)
+            state_3 = tf.contrib.rnn.LSTMStateTuple(state_c_3, state_h_3)
 
-        # Training actor
-        actor_params = tf.trainable_variables('ppo_model/actor_network')
-        actor_trainer = tf.train.AdamOptimizer(learning_rate=ACTOR_LR, epsilon=1e-5)
-        actor_grads_and_var = actor_trainer.compute_gradients(actor_loss, actor_params)
-        actor_grads, actor_var = zip(*actor_grads_and_var)
-        actor_grads, actor_grad_norm = tf.clip_by_global_norm(actor_grads, MAX_GRAD_NORM)
-        actor_grads_and_var = list(zip(actor_grads, actor_var))
+            varscope.reuse_variables()
+            (output_4, state_o_4) = cell(inputs[3], state_3)
+            outputs.append(output_4)
+            state_c_4 = state_o_4.c
+            state_h_4 = state_o_4.h
+            state_ch = tf.concat([state_c_4, state_h_4], axis=-1)
+            decode_output, encoder_output_4, add_ph_4 = self.encoder(state_ch)
+            state_c_4, state_h_4 = tf.split(decode_output, 2, axis=-1)
+            state_4 = tf.contrib.rnn.LSTMStateTuple(state_c_4, state_h_4)
 
-        #  Training critic
-        critic_params = tf.trainable_variables('ppo_model/critic_network')
-        critic_trainer = tf.train.AdamOptimizer(learning_rate=CRITIC_LR, epsilon=1e-5)
-        critic_grads_and_var = critic_trainer.compute_gradients(critic_loss, critic_params)
-        critic_grads, critic_var = zip(*critic_grads_and_var)
-        critic_grads, critic_grad_norm = tf.clip_by_global_norm(critic_grads, MAX_GRAD_NORM)
-        critic_grads_and_var = list(zip(critic_grads, critic_var))
+            varscope.reuse_variables()
+            (output_5, state_o_5) = cell(inputs[4], state_4)
+            outputs.append(output_5)
 
-        self.actor_train_op = actor_trainer.apply_gradients(actor_grads_and_var)
-        self.critic_train_op = critic_trainer.apply_gradients(critic_grads_and_var)
+            return outputs, encoder_output_1, add_ph_1, encoder_output_2, add_ph_2, encoder_output_3, add_ph_3, \
+                encoder_output_4, add_ph_4
 
-        self.loss_names = ['actor_loss', 'policy_entropy', 'policy_loss', 'value_loss', 'clipfrac', 'actor_grad_norm',
-                           'critic_grad_norm']
-        self.stats_list = [actor_loss, entropy, policy_loss, critic_loss, clip_frac, actor_grad_norm, critic_grad_norm]
+    def actor_comm(self, cell_one, cell_two, cell_three, cell_four, cell_five, memory_cell, input_state, five_inputs):
+        """Building communication layer with binary messages"""
+        with vs.variable_scope("full_communication_channels"):
+            one_inputs = [five_inputs[1], five_inputs[2], five_inputs[3], five_inputs[4], five_inputs[0]]
+            two_inputs = [five_inputs[0], five_inputs[2], five_inputs[3], five_inputs[4], five_inputs[1]]
+            three_inputs = [five_inputs[0], five_inputs[1], five_inputs[3], five_inputs[4], five_inputs[2]]
+            four_inputs = [five_inputs[0], five_inputs[1], five_inputs[2], five_inputs[4], five_inputs[3]]
 
-        self.step = act_model.step
-        self.value = act_model.value
-        self.evalue = evalue_model.evalue
+            with vs.variable_scope("memory") as memory_scope:
+                memory_inputs = tf.stack(five_inputs, 1)
+                memory_inputs = [tf.reshape(memory_inputs, (-1, memory_inputs.shape[-1]))]
+                output_memory, output_state = tf.contrib.rnn.static_rnn(
+                    cell=memory_cell,
+                    inputs=memory_inputs,
+                    scope=memory_scope,
+                    initial_state=input_state,
+                    dtype=tf.float32)
 
-        initialize()
+                output_memory = tf.reshape(output_memory[0], (-1, NUM_AGENTS, output_memory[0].shape[-1]))
+                output_memory = [output_memory[:, 0], output_memory[:, 1], output_memory[:, 2], output_memory[:, 3],
+                                 output_memory[:, 4]]
 
-    def train(self, obs, state, returns, values, action, ps,
-              critic_input_state_c, critic_input_state_h,
-              actor_input_state_c, actor_input_state_h
-              ):
-        actor_input_state_c = np.reshape(actor_input_state_c, (-1, ACTOR_LAYER2))
-        actor_input_state_h = np.reshape(actor_input_state_h, (-1, ACTOR_LAYER2))
-        critic_input_state_c = np.reshape(critic_input_state_c, (-1, CRITIC_LAYER2))
-        critic_input_state_h = np.reshape(critic_input_state_h, (-1, CRITIC_LAYER2))
+            with vs.variable_scope("one") as one_scope:
+                output_one, self.one_output_1, self.one_add_1, self.one_output_2, self.one_add_2, self.one_output_3, \
+                    self.one_add_3, self.one_output_4, self.one_add_4 = self.static_rnn(
+                        cell=cell_one,
+                        inputs=one_inputs,
+                        dtype=tf.float32,
+                        scope=one_scope)
 
-        advantage = returns - values
-        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-        td_map = {
-            self.train_model.obs: obs,
-            self.train_model.state: state,
-            self.advantage: advantage,
-            self.returns: returns,
-            self.old_v: values,
-            self.action: action,
-            self.train_model.critic_input_state_c: critic_input_state_c,
-            self.train_model.critic_input_state_h: critic_input_state_h,
-            self.train_model.actor_input_state_c: actor_input_state_c,
-            self.train_model.actor_input_state_h: actor_input_state_h,
-            self.old_ps: ps
-        }
+            with vs.variable_scope("two") as two_scope:
+                output_two, self.two_output_1, self.two_add_1, self.two_output_2, self.two_add_2, self.two_output_3, \
+                    self.two_add_3, self.two_output_4, self.two_add_4 = self.static_rnn(
+                        cell=cell_two,
+                        inputs=two_inputs,
+                        dtype=tf.float32,
+                        scope=two_scope)
 
-        state = self.sess.run(self.stats_list + [self.actor_train_op, self.critic_train_op], td_map)[:-2]
-        return state
+            with vs.variable_scope("three") as three_scope:
+                output_three, self.three_output_1, self.three_add_1, self.three_output_2, self.three_add_2, \
+                    self.three_output_3, self.three_add_3, self.three_output_4, self.three_add_4 = self.static_rnn(
+                        cell=cell_three,
+                        inputs=three_inputs,
+                        dtype=tf.float32,
+                        scope=three_scope)
+
+            with vs.variable_scope("four") as four_scope:
+                output_four, self.four_output_1, self.four_add_1, self.four_output_2, self.four_add_2, \
+                    self.four_output_3, self.four_add_3, self.four_output_4, self.four_add_4 = self.static_rnn(
+                        cell=cell_four,
+                        inputs=four_inputs,
+                        dtype=tf.float32,
+                        scope=four_scope)
+
+            with vs.variable_scope("five") as five_scope:
+                output_five, self.five_output_1, self.five_add_1, self.five_output_2, self.five_add_2, \
+                    self.five_output_3, self.five_add_3, self.five_output_4, self.five_add_4 = self.static_rnn(
+                        cell=cell_five,
+                        inputs=five_inputs,
+                        dtype=tf.float32,
+                        scope=five_scope)
+
+        final_output_one = [output_one[4], output_one[0], output_one[1], output_one[2], output_one[3]]
+        final_output_two = [output_two[0], output_two[4], output_two[1], output_two[2], output_two[3]]
+        final_output_three = [output_three[0], output_three[1], output_three[4], output_three[2], output_three[3]]
+        final_output_four = [output_four[0], output_four[1], output_four[2], output_four[4], output_four[3]]
+
+        flat_outputs = tuple(array_ops.concat([one, two, three, four, five, memory], 1)
+                             for one, two, three, four, five, memory in
+                             zip(final_output_one, final_output_two, final_output_three, final_output_four,
+                                 output_five, output_memory))
+
+        outputs = nest.pack_sequence_as(
+            structure=output_one, flat_sequence=flat_outputs)
+
+        return outputs, output_state
+
+    @staticmethod
+    def critic_comm(cell_one, cell_two, cell_three, cell_four, cell_five, five_inputs):
+        """Building communication layer with real value messages"""
+        with vs.variable_scope("full_communication_layer"):
+            one_inputs = [five_inputs[1], five_inputs[2], five_inputs[3], five_inputs[4], five_inputs[0]]
+            two_inputs = [five_inputs[0], five_inputs[2], five_inputs[3], five_inputs[4], five_inputs[1]]
+            three_inputs = [five_inputs[0], five_inputs[1], five_inputs[3], five_inputs[4], five_inputs[2]]
+            four_inputs = [five_inputs[0], five_inputs[1], five_inputs[2], five_inputs[4], five_inputs[3]]
+
+            with vs.variable_scope("one") as one_scope:
+                output_one, _ = tf.contrib.rnn.static_rnn(
+                    cell=cell_one,
+                    inputs=one_inputs,
+                    dtype=tf.float32,
+                    scope=one_scope)
+
+            with vs.variable_scope("two") as two_scope:
+                output_two, _ = tf.contrib.rnn.static_rnn(
+                    cell=cell_two,
+                    inputs=two_inputs,
+                    dtype=tf.float32,
+                    scope=two_scope)
+
+            with vs.variable_scope("three") as three_scope:
+                output_three, _ = tf.contrib.rnn.static_rnn(
+                    cell=cell_three,
+                    inputs=three_inputs,
+                    dtype=tf.float32,
+                    scope=three_scope)
+
+            with vs.variable_scope("four") as four_scope:
+                output_four, _ = tf.contrib.rnn.static_rnn(
+                    cell=cell_four,
+                    inputs=four_inputs,
+                    dtype=tf.float32,
+                    scope=four_scope)
+
+            with vs.variable_scope("five") as five_scope:
+                output_five, _ = tf.contrib.rnn.static_rnn(
+                    cell=cell_five,
+                    inputs=five_inputs,
+                    dtype=tf.float32,
+                    scope=five_scope)
+
+        final_output_one = [output_one[4], output_one[0], output_one[1], output_one[2], output_one[3]]
+        final_output_two = [output_two[0], output_two[4], output_two[1], output_two[2], output_two[3]]
+        final_output_three = [output_three[0], output_three[1], output_three[4], output_three[2], output_three[3]]
+        final_output_four = [output_four[0], output_four[1], output_four[2], output_four[4], output_four[3]]
+
+        flat_outputs = tuple(array_ops.concat([one, two, three, four, five], 1)
+                             for one, two, three, four, five in
+                             zip(final_output_one, final_output_two, final_output_three, final_output_four,
+                                 output_five))
+
+        outputs = nest.pack_sequence_as(
+            structure=output_one, flat_sequence=flat_outputs)
+
+        return outputs
+
+    def base_build_critic_network(self, state):
+        outputs = self.shared_dense_layer("critic_layer1", state, CRITIC_LAYER1)
+        outputs = tf.unstack(outputs, NUM_AGENTS, 1)
+
+        lstm_cell_one = BasicLSTMCell(CRITIC_LAYER2, forget_bias=1.0,
+                                      name="lstm_cell_one")
+        lstm_cell_two = BasicLSTMCell(CRITIC_LAYER2, forget_bias=1.0,
+                                      name="lstm_cell_two")
+        lstm_cell_three = BasicLSTMCell(CRITIC_LAYER2, forget_bias=1.0,
+                                        name="lstm_cell_three")
+        lstm_cell_four = BasicLSTMCell(CRITIC_LAYER2, forget_bias=1.0,
+                                       name="lstm_cell_four")
+        lstm_cell_five = BasicLSTMCell(CRITIC_LAYER2, forget_bias=1.0,
+                                       name="lstm_cell_five")
+        # Build communication net
+        outputs = self.critic_comm(lstm_cell_one, lstm_cell_two, lstm_cell_three, lstm_cell_four, lstm_cell_five,
+                                   outputs)
+        outputs = tf.stack(outputs, 1)
+        outputs = self.shared_dense_layer("critic_layer2", outputs, CRITIC_OUTPUT_LEN)
+
+        return outputs
+
+    def base_build_actor_network(self, observation, input_state):
+        outputs = self.shared_dense_layer("actor_layer1", observation, ACTOR_LAYER1)
+        outputs = tf.unstack(outputs, NUM_AGENTS, 1)
+        lstm_cell_one = BasicLSTMCell(ACTOR_LAYER2, forget_bias=1.0,
+                                      name="lstm_cell_one")
+        lstm_cell_two = BasicLSTMCell(ACTOR_LAYER2, forget_bias=1.0,
+                                      name="lstm_cell_two")
+        lstm_cell_three = BasicLSTMCell(ACTOR_LAYER2, forget_bias=1.0,
+                                        name="lstm_cell_three")
+        lstm_cell_four = BasicLSTMCell(ACTOR_LAYER2, forget_bias=1.0,
+                                       name="lstm_cell_four")
+        lstm_cell_five = BasicLSTMCell(ACTOR_LAYER2, forget_bias=1.0,
+                                       name="lstm_cell_five")
+        lstm_memory_cell = BasicLSTMCell(ACTOR_LAYER2, forget_bias=1.0,
+                                         name="lstm_memory_cell")
+        # Build communication net
+        outputs, output_state = self.actor_comm(lstm_cell_one, lstm_cell_two, lstm_cell_three, lstm_cell_four,
+                                                lstm_cell_five, lstm_memory_cell, input_state,
+                                                outputs)
+
+        outputs = tf.stack(outputs, 1)
+
+        outputs = self.shared_dense_layer("actor_layer2", outputs, ACTOR_OUTPUT_LEN)
+
+        return outputs, output_state
+
+    def actor_build_network(self, name, observation, input_state):
+        """Building a multi-agent actor net"""
+        with tf.variable_scope(name):
+            outputs, output_state = self.base_build_actor_network(observation, input_state)
+            action_probs = tf.nn.softmax(outputs, axis=-1)
+            log_action_probs = tf.nn.log_softmax(outputs, axis=-1)
+            # Policy without noise
+            mu = tf.argmax(outputs, axis=-1)
+            # Policy with noise
+            policy_dist = tf.distributions.Categorical(logits=outputs)
+            pi = policy_dist.sample()
+            return mu, pi, action_probs, log_action_probs, output_state
+
+    @staticmethod
+    def shared_dense_layer(name, observation, output_len):
+        """The weights of dense layer are shared."""
+        all_outputs = []
+        with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
+            for j in range(NUM_AGENTS):
+                agent_obs = observation[:, j]
+                outputs = tf.layers.dense(agent_obs, output_len, name="dense")
+                all_outputs.append(outputs)
+            all_outputs = tf.stack(all_outputs, 1)
+        return all_outputs
+
+    def critic_build_network(self, name, state, action):
+        """Building a multi-agent critic net"""
+        with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
+            outputs = self.base_build_critic_network(state)
+            # Responsible output
+            q_a = tf.reduce_sum(tf.multiply(outputs, action), axis=-1)
+            return outputs, q_a

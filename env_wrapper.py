@@ -1,9 +1,11 @@
 import multiprocessing as mp
+import random
 
+import gym
 import numpy as np
-from smac.env import StarCraft2Env
 
-from env_parameters import env_args
+from arguments import *
+import environments
 
 
 class CloudpickleWrapper(object):
@@ -26,8 +28,9 @@ class CloudpickleWrapper(object):
 def build_multiprocessing_env(nenv):
     def get_env_fn(rank):
         def init_env():
-            env = StarCraft2Env(**env_args)
-            env.seed(env_args['seed'] + rank * 100)
+            env = gym.make('MultiagentCatch-v0')
+            np.random.seed(ENV_SEED + rank * 100)
+            random.seed(ENV_SEED + rank * 100)
             return env
 
         return init_env
@@ -53,15 +56,13 @@ class SubprocVecEnv(object):
         for remote in self.work_remotes:
             remote.close()
 
-        self.remotes[0].send(('get_env_info', None))
+        self.remotes[0].send(('get_info', None))
         info_dic = self.remotes[0].recv()
 
-        self.num_agents = info_dic['n_agents']
-        self.obs_shape = info_dic['obs_shape']
-        self.state_shape = info_dic['state_shape']
-        self.cent_state_shape = self.obs_shape + self.state_shape
-        self.n_actions = info_dic['n_actions']
-        self.episode_len = info_dic['episode_limit']
+        self.num_agents = info_dic[0]
+        self.obs_shape = info_dic[2]
+        self.state_shape = info_dic[3]
+        self.n_actions = info_dic[1]
 
     def step_async(self, actions):
         self._assert_not_closed()
@@ -87,30 +88,13 @@ class SubprocVecEnv(object):
             remote.send(('reset', None))
         _ = [remote.recv() for remote in self.remotes]
 
-    def get_state(self):
+    def get_obs_state(self):
         self._assert_not_closed()
         for remote in self.remotes:
-            remote.send(('get_state', None))
-        state = [remote.recv() for remote in self.remotes]
-        state = np.stack(state)
-        return np.expand_dims(state, axis=1)
-
-    def get_avail_actions(self):
-        self._assert_not_closed()
-        for remote in self.remotes:
-            remote.send(('get_avail_actions', None))
-        avail_actions = [remote.recv() for remote in self.remotes]
-        return np.stack(avail_actions)
-
-    def get_obs(self):
-        self._assert_not_closed()
-        for remote in self.remotes:
-            remote.send(('get_obs', None))
-        obs = [remote.recv() for remote in self.remotes]
-        return np.stack(obs)
-
-    def _assert_not_closed(self):
-        assert not self.closed, "Trying to operate on a SubprocVecEnv after calling close()"
+            remote.send(('get_obs_state', None))
+        results = [remote.recv() for remote in self.remotes]
+        obs, state = zip(*results)
+        return np.stack(obs), np.stack(state)
 
     def close_extras(self):
         self.closed = True
@@ -127,6 +111,9 @@ class SubprocVecEnv(object):
             return
         self.close_extras()
         self.closed = True
+
+    def _assert_not_closed(self):
+        assert not self.closed, "Trying to operate on a SubprocVecEnv after calling close()"
 
 
 def worker(remote, parent_remote, env_fn_wrappers):
@@ -149,14 +136,10 @@ def worker(remote, parent_remote, env_fn_wrappers):
                 envs.close()
                 remote.close()
                 break
-            elif cmd == 'get_env_info':
-                remote.send(envs.get_env_info())
-            elif cmd == 'get_state':
-                remote.send(envs.get_state())
-            elif cmd == 'get_obs':
-                remote.send(envs.get_obs())
-            elif cmd == 'get_avail_actions':
-                remote.send(envs.get_avail_actions())
+            elif cmd == 'get_info':
+                remote.send(envs.get_info())
+            elif cmd == 'get_obs_state':
+                remote.send(envs.get_obs_state())
             else:
                 raise NotImplementedError
     except KeyboardInterrupt:
