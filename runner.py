@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 
 from alg_parameters import *
@@ -11,12 +13,8 @@ class Runner(object):
         """Initialize environments"""
         self.env = env
         self.model = model
-        self.episode_rewards = np.zeros((N_ENVS,))
         self.env.reset()
-        self.obs = env.get_obs()
-        self.state = env.get_state()
-        self.state = np.repeat(self.state, N_AGENTS, axis=1)
-        self.cent_state = np.concatenate((self.obs, self.state), axis=-1)
+        self.obs, self.state = env.get_obs_state()
         self.dones = [False for _ in range(N_ENVS)]
         self.actor_hidden_state_c = np.zeros((N_ENVS * N_AGENTS, ACTOR_LAYER2))
         self.actor_hidden_state_h = np.zeros((N_ENVS * N_AGENTS, ACTOR_LAYER2))
@@ -25,42 +23,44 @@ class Runner(object):
 
     def run(self):
         # Use to store experiences
-        mb_obs, mb_cent_state, mb_rewards, mb_values, mb_dones, \
-            ep_infos, mb_actions, mb_ps = [], [], [], [], [], [], [], []
-        mb_actor_hidden_state_c, mb_actor_hidden_state_h, \
-            mb_critic_hidden_state_c, mb_critic_hidden_state_h = [], [], [], []
-        episode_rewrads_info = []
+        mb_obs, mb_state, mb_rewards, mb_values, mb_dones, mb_logp, \
+            ep_infos, mb_actions = [], [], [], [], [], [], [], []
+        mb_actor_hidden_state_c, mb_actor_hidden_state_h, mb_critic_hidden_state_c, \
+            mb_critic_hidden_state_h = [], [], [], []
 
         for _ in range(N_STEPS):
-            mb_obs.append(self.obs)
-            mb_cent_state.append(self.cent_state)
+            # Due to parameter sharing, changing the input order equal to changing the connection order
+            step_order = random.sample(range(0, 5), 5)
+            changed_obs = [self.obs[:, step_order[0], :], self.obs[:, step_order[1], :], self.obs[:, step_order[2], :],
+                           self.obs[:, step_order[3], :], self.obs[:, step_order[4], :]]
+            changed_state = [self.state[:, step_order[0], :], self.state[:, step_order[1], :],
+                             self.state[:, step_order[2], :],
+                             self.state[:, step_order[3], :], self.state[:, step_order[4], :]]
+            changed_obs = np.stack(changed_obs, axis=1)
+            changed_state = np.stack(changed_state, axis=1)
+            mb_obs.append(changed_obs.copy())
+            mb_state.append(changed_state.copy())
             mb_actor_hidden_state_c.append(self.actor_hidden_state_c)
             mb_critic_hidden_state_c.append(self.critic_hidden_state_c)
             mb_actor_hidden_state_h.append(self.actor_hidden_state_h)
             mb_critic_hidden_state_h.append(self.critic_hidden_state_h)
-
-            valid_action = self.env.get_avail_actions()
-            actions, values, ps, critic_hidden_state, actor_hidden_state = self.model.step(self.obs, self.cent_state,
-                                                                                           valid_action,
-                                                                                           self.critic_hidden_state_c,
-                                                                                           self.critic_hidden_state_h,
-                                                                                           self.actor_hidden_state_c,
-                                                                                           self.actor_hidden_state_h)
+            changed_values, changed_action_log_probs, changed_actions, critic_hidden_state, actor_hidden_state = self.model.step(
+                changed_obs, changed_state, self.critic_hidden_state_c, self.critic_hidden_state_h,
+                self.actor_hidden_state_c, self.actor_hidden_state_h)
             self.critic_hidden_state_c, self.critic_hidden_state_h = critic_hidden_state
             self.actor_hidden_state_c, self.actor_hidden_state_h = actor_hidden_state
-
-            mb_values.append(values)
-            mb_ps.append(ps)
-            mb_actions.append(actions)
+            mb_values.append(changed_values)
+            mb_logp.append(changed_action_log_probs)
             mb_dones.append(self.dones)
+            mb_actions.append(changed_actions)
+            actions = np.zeros(changed_actions.shape)
+            actions[:, step_order[0]], actions[:, step_order[1]], actions[:, step_order[2]], \
+                actions[:, step_order[3]], actions[:, step_order[4]] = changed_actions[:, 0], changed_actions[:, 1], \
+                                                                        changed_actions[:, 2], changed_actions[:,3], \
+                                                                        changed_actions[:, 4]
 
             rewards, self.dones, infos = self.env.step(actions)
-
-            self.obs = self.env.get_obs()
-            self.state = self.env.get_state()
-            self.state = np.repeat(self.state, N_AGENTS, axis=1)
-            self.cent_state = np.concatenate((self.obs, self.state), axis=-1)
-            self.episode_rewards += rewards
+            self.obs, self.state = self.env.get_obs_state()
 
             true_index = np.argwhere(self.dones)
             if len(true_index) != 0:
@@ -82,26 +82,24 @@ class Runner(object):
                                                         (-1, CRITIC_LAYER2))
                 self.critic_hidden_state_h = np.reshape(self.critic_hidden_state_h,
                                                         (-1, CRITIC_LAYER2))
-
-                # Record information of the episode when it ends
-                episode_rewrads_info.append(np.nanmean(self.episode_rewards[true_index]))
-                self.episode_rewards[true_index] = np.zeros(self.episode_rewards[true_index].shape)
                 if true_index.shape == ():
                     ep_infos.append(infos[true_index])
                 else:
                     for item in true_index:
                         ep_infos.append(infos[item])
-            mb_rewards.append(rewards)
+
+            changed_rewards = [rewards[:, step_order[0]], rewards[:, step_order[1]], rewards[:, step_order[2]],
+                               rewards[:, step_order[3]], rewards[:, step_order[4]]]
+            changed_rewards = np.stack(changed_rewards, axis=1)
+            mb_rewards.append(changed_rewards)
 
         mb_obs = np.asarray(mb_obs, dtype=np.float32)
-        mb_cent_state = np.asarray(mb_cent_state, dtype=np.float32)
+        mb_state = np.asarray(mb_state, dtype=np.float32)
         mb_rewards = np.asarray(mb_rewards, dtype=np.float32)
-        mb_rewards = np.expand_dims(mb_rewards, axis=-1)
-        mb_rewards = np.repeat(mb_rewards, N_AGENTS, axis=-1)
         mb_values = np.asarray(mb_values, dtype=np.float32)
+        mb_logp = np.asarray(mb_logp, dtype=np.float32)
         mb_dones = np.asarray(mb_dones, dtype=np.bool)
         mb_actions = np.asarray(mb_actions, dtype=np.int32)
-        mb_ps = np.asarray(mb_ps, dtype=np.float32)
         mb_actor_hidden_state_c = np.asarray(mb_actor_hidden_state_c, dtype=np.float32)
         mb_actor_hidden_state_h = np.asarray(mb_actor_hidden_state_h, dtype=np.float32)
         mb_critic_hidden_state_c = np.asarray(mb_critic_hidden_state_c, dtype=np.float32)
@@ -111,7 +109,7 @@ class Runner(object):
         mb_critic_hidden_state_c = np.reshape(mb_critic_hidden_state_c, (N_STEPS, -1, N_AGENTS, CRITIC_LAYER2))
         mb_critic_hidden_state_h = np.reshape(mb_critic_hidden_state_h, (N_STEPS, -1, N_AGENTS, CRITIC_LAYER2))
         # Calculate advantages
-        last_values = self.model.value(self.cent_state, self.critic_hidden_state_c,
+        last_values = self.model.value(self.state, self.critic_hidden_state_c,
                                        self.critic_hidden_state_h)
         mb_advs = np.zeros_like(mb_rewards)
         last_gae_lam = 0
@@ -129,6 +127,6 @@ class Runner(object):
             delta = mb_rewards[t] + GAMMA * next_values * next_nonterminal - mb_values[t]
             mb_advs[t] = last_gae_lam = delta + GAMMA * LAM * next_nonterminal * last_gae_lam
         mb_returns = mb_advs + mb_values
-        return (*map(swap_flat, (mb_obs, mb_cent_state, mb_returns, mb_values, mb_actions, mb_ps,
+        return (*map(swap_flat, (mb_obs, mb_state, mb_returns, mb_values, mb_logp, mb_actions,
                                  mb_critic_hidden_state_c, mb_critic_hidden_state_h, mb_actor_hidden_state_c,
-                                 mb_actor_hidden_state_h)), ep_infos, np.nanmean(episode_rewrads_info))
+                                 mb_actor_hidden_state_h)), ep_infos)
