@@ -16,7 +16,7 @@ from util import get_session, save_state
 def learn(env):
     """Update model and record performance."""
     evalue_env = StarCraft2Env(**env_args)
-    evalue_env.seed(env_args['seed'] + 100 * N_ENVS)
+    evalue_env._seed=env_args['seed'] + 100 * N_ENVS
 
     sess = get_session()
 

@@ -27,7 +27,7 @@ def build_multiprocessing_env(nenv):
     def get_env_fn(rank):
         def init_env():
             env = StarCraft2Env(**env_args)
-            env.seed(env_args['seed'] + rank * 100)
+            env._seed=env_args['seed'] + rank * 100
             return env
 
         return init_env
