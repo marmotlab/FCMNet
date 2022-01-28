@@ -2,6 +2,7 @@
 This is the code for implementing the FCMNet algorithm presented in the paper which will appear AAMAS 2022:"FCMNet: Full Communication Memory Net for Team-Level Cooperation in Multi-Agent Systems"
 
 ## Requirements
+python == 3.7
 ```
 pip install -r requirements.txt
 ```
