@@ -32,3 +32,8 @@ First modify parameters in ```alg_parameters.py``` and ```env_parameters.py```, 
 
 ## Other Links
 install starcraft environment - https://github.com/oxwhirl/smac
+
+## Authors
+Yutong Wang
+
+Guillaume Sartoretti
