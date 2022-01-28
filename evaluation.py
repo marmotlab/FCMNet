@@ -34,7 +34,7 @@ with tf.Session() as sess:
 
     # Setting up an evaluation environment
     env = StarCraft2Env(**env_args)
-    env.seed(env_args['seed'] + 100 * N_ENVS)
+    env._seed=env_args['seed'] + 100 * N_ENVS
     set_global_seeds(1234)
 
     # Running
