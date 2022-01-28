@@ -76,6 +76,8 @@ class MultiAgentEnv(gym.Env):
         self.episode_reward += np.mean(reward_n)
         info['episode_reward'] = self.episode_reward
         info['episode_len'] = self.episode_len
+        if self.episode_len >= 1024:
+            done_n = [True]
         return np.array(reward_n), all(done_n), info
 
     def get_obs_state(self):
