@@ -1,6 +1,6 @@
 The MIT License (MIT)
 
-Copyright (c) .NET Foundation and Contributors
+Copyright (c) .MARMot Lab @ NUS-ME
 
 All rights reserved.
 
